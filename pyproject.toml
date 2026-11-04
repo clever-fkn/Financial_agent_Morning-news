@@ -1,0 +1,23 @@
+[project]
+name = "bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "clever-fkn", email = "2047825024@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "feedparser>=6.0.14",
+    "httpx>=0.28.1",
+    "lark-oapi>=1.7.5",
+    "openai>=3.45.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+bot = "bot:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
