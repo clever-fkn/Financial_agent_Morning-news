@@ -14,7 +14,7 @@ class DeepSeekClient:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             timeout=30.0,
-            max_retries=1,
+            max_retries=2,
         )
 
     def answer(self, user_text: str) -> str:

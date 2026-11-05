@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import logging
 
+from .agent import NewsAgent
 from .config import Settings
-from .deepseek import DeepSeekClient
-from .digest import NewsDigestService
 from .feishu import FeishuBot
-from .news import NewsCollector
 
 
 def main() -> None:
@@ -15,13 +13,12 @@ def main() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
     settings = Settings.from_env()
-    deepseek = DeepSeekClient(settings)
-    digest = NewsDigestService(
-        collector=NewsCollector(),
-        deepseek=deepseek,
-    )
-    bot = FeishuBot(settings, deepseek, digest)
+    agent = NewsAgent(settings)
+    bot = FeishuBot(settings, agent)
     try:
         bot.start()
     except KeyboardInterrupt:
         logging.getLogger(__name__).info("Bot stopped by user.")
+    finally:
+        bot.close()
+        agent.close()

@@ -3,10 +3,13 @@ from __future__ import annotations
 import html
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 import httpx
@@ -42,7 +45,7 @@ def _title_key(title: str) -> str:
 class NewsCollector:
     def __init__(
         self,
-        timeout: float = 15.0,
+        timeout: float = 8.0,
         config_path: str | Path | None = None,
     ) -> None:
         self._timeout = timeout
@@ -53,7 +56,13 @@ class NewsCollector:
         )
         self._categories = _load_config(path)
 
-    def collect(self, category: str, limit: int | None = None) -> list[NewsItem]:
+    def collect(
+        self,
+        category: str,
+        limit: int | None = None,
+        max_age_hours: int | None = None,
+        keywords: str | None = None,
+    ) -> list[NewsItem]:
         config = self._categories.get(category)
         if config is None:
             raise ValueError(f"Unsupported news category: {category}")
@@ -61,27 +70,52 @@ class NewsCollector:
         final_limit = config.default_limit if limit is None else limit
         if final_limit < 1:
             raise ValueError("News limit must be at least 1.")
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=config.max_age_hours)
+
+        final_max_age_hours = (
+            config.max_age_hours if max_age_hours is None else max_age_hours
+        )
+        if not 1 <= final_max_age_hours <= 24 * 30:
+            raise ValueError("max_age_hours must be between 1 and 720.")
+
+        final_keywords = keywords.strip() if keywords else None
+        if final_keywords and len(final_keywords) > 100:
+            raise ValueError("keywords must not exceed 100 characters.")
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=final_max_age_hours)
 
         items: list[NewsItem] = []
         seen_titles: set[str] = set()
         errors: list[str] = []
 
         headers = {"User-Agent": "FeishuPersonalNewsBot/0.1"}
-        transport = httpx.HTTPTransport(retries=2)
+        # Sources are fetched concurrently and one failing feed must not hold
+        # the whole digest. Other healthy feeds provide the fallback coverage.
+        transport = httpx.HTTPTransport(retries=0)
         with httpx.Client(
             headers=headers,
             follow_redirects=True,
             timeout=self._timeout,
             transport=transport,
         ) as client:
-            for source in config.sources:
-                try:
-                    response = client.get(source.url)
-                    response.raise_for_status()
-                    feed = feedparser.parse(response.content)
-                except Exception as exc:
-                    errors.append(f"{source.name}: {type(exc).__name__}")
+            source_requests = [
+                (source, _build_source_url(source.url, final_keywords))
+                for source in config.sources
+            ]
+            with ThreadPoolExecutor(
+                max_workers=min(4, len(source_requests)),
+                thread_name_prefix="news-source",
+            ) as executor:
+                source_results = list(
+                    executor.map(
+                        lambda request: _fetch_source(client, *request),
+                        source_requests,
+                    )
+                )
+
+            for source, source_url, feed, error_name in source_results:
+                is_search_source = source_url != source.url
+                if error_name is not None or feed is None:
+                    errors.append(f"{source.name}: {error_name or 'unknown error'}")
                     continue
 
                 # Limit each feed so one large source does not dominate the list.
@@ -101,6 +135,15 @@ class NewsCollector:
                         or key in seen_titles
                         or published_at is None
                         or published_at < cutoff
+                        or (
+                            final_keywords
+                            and not is_search_source
+                            and not _matches_keywords(
+                                title,
+                                snippet,
+                                final_keywords,
+                            )
+                        )
                     ):
                         continue
 
@@ -123,6 +166,19 @@ class NewsCollector:
         return items[:final_limit]
 
 
+def _fetch_source(
+    client: httpx.Client,
+    source: NewsSource,
+    source_url: str,
+) -> tuple[NewsSource, str, Any | None, str | None]:
+    try:
+        response = client.get(source_url)
+        response.raise_for_status()
+        return source, source_url, feedparser.parse(response.content), None
+    except Exception as exc:
+        return source, source_url, None, type(exc).__name__
+
+
 def format_news_list(title: str, items: list[NewsItem]) -> str:
     lines = [title]
     for index, item in enumerate(items, start=1):
@@ -140,6 +196,35 @@ def _clean_html(value: str) -> str:
     without_tags = re.sub(r"<[^>]+>", " ", value)
     unescaped = html.unescape(without_tags)
     return re.sub(r"\s+", " ", unescaped).strip()
+
+
+def _build_source_url(url: str, keywords: str | None) -> str:
+    """Replace the query of a supported search RSS source."""
+
+    if not keywords:
+        return url
+
+    parts = urlsplit(url)
+    if not parts.hostname or not parts.hostname.casefold().endswith("bing.com"):
+        return url
+    if not parts.path.casefold().rstrip("/").endswith("/news/search"):
+        return url
+
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query["q"] = keywords
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+    )
+
+
+def _matches_keywords(title: str, snippet: str, keywords: str) -> bool:
+    terms = [
+        term.casefold()
+        for term in re.split(r"[\s,，、]+", keywords)
+        if term.strip()
+    ]
+    haystack = f"{title}\n{snippet}".casefold()
+    return not terms or any(term in haystack for term in terms)
 
 
 def _entry_published_at(entry: object) -> datetime | None:

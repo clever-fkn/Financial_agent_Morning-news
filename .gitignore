@@ -6,8 +6,15 @@ dist/
 wheels/
 *.egg-info
 
+# Personal learning documents
+/学习进度.md
+/docs/LEARNING_GUIDE.md
+
 # Virtual environments
 .venv
 
 # Local secrets
 .env
+
+# Local SQLite data and temporary journal files
+/data/*.db*
